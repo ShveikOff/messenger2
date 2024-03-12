@@ -1,15 +1,62 @@
+#tasks
+#rebuild uuid for chats for generate same id if this chat also enabled
+
 from time import time
 from datetime import datetime
 from collections import defaultdict
 import uuid
+import sqlite3
+import json
+
 
 class messenger: #Основной класс
     
     def __init__(self):
-        
+        self.connection = None
+        self.cursor = None
         self.chats_dict = defaultdict(object) # словарь который хранит все чаты мессенджера
         self.users_dict = defaultdict(object) # словарь который хранит всех пользователей
         self.users_dict_by_name = defaultdict(uuid.uuid5)
+
+        self.create_tables()
+
+    def connect_to_db(self):
+        self.connection = sqlite3.connect('mydatabase.db')
+        self.cursor = self.connection.cursor()
+
+    def close_connection_to_db(self):
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+            self.cursor = None
+
+    def create_tables(self):
+        self.connect_to_db()
+        try:
+            # Создание таблицы для чатов
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS chats
+                            (chat_id TEXT PRIMARY KEY, chat_data TEXT)''')
+            
+            # Создание таблицы для пользователей
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                            (user_id TEXT PRIMARY KEY, user_data TEXT)''')
+            
+            # Создание таблицы для пользователей по имени
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS users_by_name
+                            (user_name TEXT PRIMARY KEY, user_id TEXT)''')
+            
+            self.connection.commit()
+        except sqlite3.Error as e:
+            print ("Error during table creation: ", e)
+        self.close_connection_to_db()
+    
+    def read_tables(self):
+        self.connect_to_db()
+        self.cursor.execute("SELECT * FROM chats")
+        rows = self.cursor.fetchall()
+        for row in rows:
+            print(row)
+        self.close_connection_to_db()
     
     def sign_up_request(self):
         new_user = str(input('Введите имя нового пользователя: \n'))
@@ -24,6 +71,21 @@ class messenger: #Основной класс
         else:
             self.users_dict[new_user_id] = temp_object
             self.users_dict_by_name[new_user] = new_user_id
+
+            # Преобразуем данные пользователя в JSON-формат
+            user_data_json = json.dumps(temp_object.to_json())
+
+            self.connect_to_db()
+            # Вставляем новую запись в таблицу пользователей
+            self.cursor.execute("INSERT INTO users (user_id, user_data) VALUES (?, ?)", (str(new_user_id), user_data_json))
+
+            # Вставляем новую запись в таблицу пользователей по имени
+            self.cursor.execute("INSERT INTO users_by_name (user_name, user_id) VALUES (?, ?)", (new_user, str(new_user_id)))
+
+            # Коммитим изменения в базе данных
+            self.connection.commit()
+            self.close_connection_to_db()
+
     
     def sign_in_request(self):
         user_name = str((input('Введите имя пользователя: \n')))
@@ -71,19 +133,38 @@ class messenger: #Основной класс
             receiver_id = self.users_dict_by_name[receiver]
         else:
             print ("Пользователя с таким именем не существует")
-
+            return False
+        
         message_text = str(input('Введите текст сообщения: \n'))
         temp_object = self.chats() #Создает временный обьект класса chats
         temp_object_id = temp_object.set_id(sender_id, receiver_id) #рассчитывает уникальный id исходя из id собеседников
         if temp_object_id in self.chats_dict: #проверяет есть ли уже такой чат в словаре мессенджера
-            self.chats_dict[temp_object_id].message(sender_id, receiver_id, message_text) #отправляется сообщение в данный чат
+            sender = self.users_dict[sender_id].get_username()
+            self.chats_dict[temp_object_id].message(sender, receiver, message_text) #отправляется сообщение в данный чат
             self.chats_dict[temp_object_id].show() #отображаются все сообщения в чате
+
+            user_data_json = json.dumps(self.chats_dict[temp_object_id].to_json())
+
+            self.connect_to_db()
+            self.cursor.execute("UPDATE chats SET chat_data = ? WHERE chat_id = ?",
+                                 (user_data_json, str(self.chats_dict[temp_object_id])))
+
+            self.connection.commit()
+            self.close_connection_to_db()
         else:
             self.chats_dict[temp_object_id] = temp_object #добавляет отсутствующий чат в словарь, задает параметры и совершает операции выше
             self.chats_dict[temp_object_id].set_chat_users(sender_id, receiver_id)
             sender = self.users_dict[sender_id].get_username()
             self.chats_dict[temp_object_id].message(sender, receiver, message_text)
-            self.chats_dict[temp_object_id].show()    
+            self.chats_dict[temp_object_id].show()
+
+            user_data_json = json.dumps(temp_object.to_json())
+
+            self.connect_to_db()
+            self.cursor.execute("INSERT INTO chats (chat_id, chat_data) VALUES (?, ?)", (str(temp_object_id), user_data_json))
+
+            self.connection.commit()
+            self.close_connection_to_db()
 
     class users:
         def __init__(self):
@@ -93,6 +174,15 @@ class messenger: #Основной класс
             self.contacts = defaultdict(str)
             self.password = None
         
+        def to_json(self):
+            return {
+                'id': str(self.id),
+                'name': self.name,
+                'chats': dict(self.chats),  # Преобразуем defaultdict в обычный словарь
+                'contacts': dict(self.contacts),  # Преобразуем defaultdict в обычный словарь
+                'password': self.password
+            }
+
         def set_id(self, free_id):
             self.id = free_id
 
@@ -143,6 +233,14 @@ class messenger: #Основной класс
             
         def show (self):
             print (f'[{self.message_time}] | [{self.sender}] отправил [{self.receiver}] : {self.text}')
+        
+        def to_json(self):
+            return {
+                'sender': self.sender,
+                'receiver': self.receiver,
+                'text': self.text,
+                'message_time': self.message_time.strftime('%Y-%m-%d %H:%M:%S')
+            }
             
     class chats: #Подкласс чатов
         def __init__(self):
@@ -150,8 +248,18 @@ class messenger: #Основной класс
             self.companion = None
             self.contrcompanion = None
             self.chat_members = (self.companion, self.contrcompanion)
-            self.messages_dict = defaultdict(object) 
-            
+            self.messages_dict = defaultdict(object)
+        
+        def to_json(self):
+            messages_json = {key: value.to_json() for key, value in self.messages_dict.items()}
+            return {
+                'id': str(self.id),
+                'companion': str(self.companion),
+                'contrcompanion': str(self.contrcompanion),
+                'chat_members': list(self.chat_members),
+                'messages_dict': messages_json
+            }
+        
         def set_chat_users(self, sender_id, receiver_id):
             self.companion = sender_id
             self.contrcompanion = receiver_id
@@ -175,7 +283,7 @@ class messenger: #Основной класс
                 self.messages_dict[key].show()
 
 my_messenger = messenger()
-command_dict = {'sign_in':0, 'sign_up':0, 'message':0, 'exit':0}
+command_dict = {'sign_in':0, 'sign_up':0, 'message':0, 'exit':0, 'read_db':0}
 
 def session (user_id):
     run = True
@@ -184,6 +292,8 @@ def session (user_id):
             command = input('Введите комманду: \n')
             if command == 'message':
                 my_messenger.message_request(user_id)
+            elif command == 'read_db':
+                my_messenger.read_tables()
             elif command == 'exit':
                 run = False
             elif command not in command_dict:
